@@ -3,7 +3,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
 import { 
   Volume2, Play, Pause, Square, FileText, Upload, SkipForward, SkipBack, 
-  Languages, Sliders, BookOpen, CheckCircle, AlertCircle, RefreshCw, History, Trash2
+  Languages, Sliders, BookOpen, CheckCircle, AlertCircle, RefreshCw, History, Trash2, Download
 } from 'lucide-react';
 
 // Setup pdfjs worker using Vite asset URL resolving
@@ -54,7 +54,6 @@ const getDocumentsFromDB = async () => {
     const store = transaction.objectStore(STORE_NAME);
     const request = store.getAll();
     request.onsuccess = () => {
-      // Map to metadata only to keep it light
       const docs = request.result.map(d => ({
         id: d.id,
         name: d.name,
@@ -117,6 +116,12 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   
+  // Local Tab Recording States
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const screenStreamRef = useRef(null);
+
   const synthRef = useRef(window.speechSynthesis);
   const utteranceRef = useRef(null);
   const utteranceItemsRef = useRef([]); // maps word boundary charIndex to textItems index
@@ -323,7 +328,6 @@ export default function App() {
         };
         
         if (uploadedFile.dbBuffer) {
-          // Re-simulate FileReader onload for database ArrayBuffer
           const fakeEvent = { target: { result: uploadedFile.dbBuffer } };
           reader.onload(fakeEvent);
         } else {
@@ -393,12 +397,11 @@ export default function App() {
       setLoading(true);
       const fullDoc = await getDocumentFileFromDB(historyItem.id);
       if (fullDoc && fullDoc.fileData) {
-        // Construct a pseudo file payload to reuse processFile loader
         const pseudoFile = {
           name: fullDoc.name,
           dbBuffer: fullDoc.fileData
         };
-        await processFile(pseudoFile, false); // shouldSaveToDB = false
+        await processFile(pseudoFile, false); 
       }
     } catch (err) {
       console.error('Failed to load history item', err);
@@ -409,13 +412,12 @@ export default function App() {
 
   // Delete document from local History
   const deleteHistoryItem = async (e, id) => {
-    e.stopPropagation(); // prevent loading item
+    e.stopPropagation(); 
     if (confirm('Hapus dokumen ini dari riwayat browser Anda?')) {
       try {
         await deleteDocumentFromDB(id);
         loadHistoryList();
         
-        // If the deleted document is the current active one, clear view
         if (file && file.id === id) {
           setFile(null);
           setPdfDoc(null);
@@ -453,6 +455,11 @@ export default function App() {
       setIsPlaying(false);
       setIsPaused(false);
       setCurrentItemIndex(-1);
+      
+      // Auto-stop recording if it reaches the end
+      if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
       return;
     }
 
@@ -490,6 +497,9 @@ export default function App() {
         setIsPlaying(false);
         setIsPaused(false);
         setCurrentItemIndex(-1);
+        if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
       }
       return;
     }
@@ -507,15 +517,9 @@ export default function App() {
     utterance.onboundary = (event) => {
       if (event.name === 'word') {
         const charIndex = event.charIndex;
-        // Find the closest preceding word using a scanned search
-        let activeUtteranceItem = null;
-        for (const it of utteranceItemsRef.current) {
-          if (charIndex >= it.start) {
-            activeUtteranceItem = it;
-          } else {
-            break;
-          }
-        }
+        const activeUtteranceItem = utteranceItemsRef.current.find(it => 
+          charIndex >= it.start && charIndex <= it.end
+        );
         if (activeUtteranceItem) {
           setCurrentItemIndex(activeUtteranceItem.originalIndex);
         }
@@ -529,6 +533,11 @@ export default function App() {
         setIsPlaying(false);
         setIsPaused(false);
         setCurrentItemIndex(-1);
+        
+        // Auto-stop recording if it reaches the end
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
       }
     };
 
@@ -537,6 +546,9 @@ export default function App() {
       if (e.error !== 'interrupted') {
         setIsPlaying(false);
         setIsPaused(false);
+        if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
       }
     };
 
@@ -566,6 +578,9 @@ export default function App() {
       setIsPaused(false);
       setCurrentItemIndex(-1);
     }
+    if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
   };
 
   const nextItem = () => {
@@ -578,6 +593,77 @@ export default function App() {
     if (textItems.length === 0) return;
     const prevIdx = currentItemIndex - 1;
     if (prevIdx >= 0) startReading(prevIdx);
+  };
+
+  // --- Local Tab Audio Recording Handlers ---
+  const startRecordingAudio = async () => {
+    try {
+      alert(
+        'Petunjuk Perekaman Audio Lokal:\n\n' +
+        '1. Browser akan meminta izin membagikan layar/tab ("Share your screen/tab").\n' +
+        '2. Silakan pilih "Tab ini" (This tab).\n' +
+        '3. PASTIKAN mencentang pilihan "Bagikan audio tab" (Share tab audio).\n' +
+        '4. Klik Share/Bagikan untuk mulai merekam otomatis.'
+      );
+
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          width: 1,
+          height: 1
+        },
+        audio: true
+      });
+      
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        stream.getTracks().forEach(t => t.stop());
+        alert('Gagal merekam: Anda harus mencentang opsi "Bagikan audio tab" agar audio dapat direkam.');
+        return;
+      }
+
+      screenStreamRef.current = stream;
+      audioChunksRef.current = [];
+      setIsRecording(true);
+
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const url = URL.createObjectURL(audioBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        const baseName = file ? file.name.split('.')[0] : 'audio';
+        a.download = `${baseName}_DocuVoice.webm`;
+        a.click();
+        URL.revokeObjectURL(url);
+        
+        // Cleanup streams
+        stream.getTracks().forEach(t => t.stop());
+        setIsRecording(false);
+      };
+
+      recorder.start();
+      
+      // Start reading from the very beginning
+      startReading(0);
+
+    } catch (err) {
+      console.error('Error starting recording:', err);
+      setIsRecording(false);
+    }
+  };
+
+  const stopRecordingAudio = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
   };
 
   // Drag & drop handlers
@@ -782,7 +868,7 @@ export default function App() {
                   </span>
                   1. Gunakan <strong>Microsoft Edge</strong> atau <strong>Google Chrome</strong>.<br/>
                   2. Pilih suara yang mengandung kata <strong>"Online"</strong> atau <strong>"Natural"</strong> (berlabel ✨).<br/>
-                  3. Suara online buatan Microsoft/Google diolah secara neural di server cloud mereka, sehingga memiliki intonasi naik-turun dan hembusan nafas yang sangat mirip manusia asli dibandingkan suara bawaan komputer offline yang kaku.
+                  3. Suara online buatan Microsoft/Google diolah secara neural di server cloud mereka, sehingga memiliki intonasi naik-turnun dan hembusan nafas yang sangat mirip manusia asli dibandingkan suara bawaan komputer offline yang kaku.
                 </div>
               </div>
             </div>
@@ -839,7 +925,7 @@ export default function App() {
           
           {/* Top Controls Bar */}
           <div className="glass-panel" style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexShrink: 0 }}>
-            <div style={{ display: 'flex', gap: '6px' }}>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
               <button 
                 onClick={prevItem} 
                 disabled={textItems.length === 0 || currentItemIndex <= 0}
@@ -887,6 +973,28 @@ export default function App() {
               >
                 <SkipForward size={14} />
               </button>
+
+              {/* Local Tab Audio Recorder Button */}
+              {isRecording ? (
+                <button 
+                  onClick={stopRecordingAudio}
+                  className="glow-btn"
+                  style={{ padding: '8px 16px', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)' }}
+                >
+                  <Square size={14} />
+                  <span className="animate-pulse">Stop Rekam</span>
+                </button>
+              ) : (
+                <button 
+                  onClick={startRecordingAudio}
+                  disabled={textItems.length === 0}
+                  className="glass-panel"
+                  style={{ padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', color: '#fff', border: '1px solid var(--border-color)', fontSize: '13px' }}
+                >
+                  <Download size={14} />
+                  <span>Ekspor Audio</span>
+                </button>
+              )}
             </div>
 
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '10px' }}>
