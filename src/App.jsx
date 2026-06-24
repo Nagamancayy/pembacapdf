@@ -121,6 +121,7 @@ export default function App() {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const screenStreamRef = useRef(null);
+  const speechTimerRef = useRef(null);
 
   const synthRef = useRef(window.speechSynthesis);
   const utteranceRef = useRef(null);
@@ -504,6 +505,12 @@ export default function App() {
       return;
     }
 
+    // Clear any existing backup timer
+    if (speechTimerRef.current) {
+      clearInterval(speechTimerRef.current);
+      speechTimerRef.current = null;
+    }
+
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     utteranceRef.current = utterance;
 
@@ -514,19 +521,46 @@ export default function App() {
     utterance.pitch = pitch;
     utterance.volume = volume;
 
+    // Estimate speaking rate: ~150 words per minute at 1.0 rate.
+    // Set a timer interval to advance the highlight if the online voice does not trigger boundaries.
+    const wordsPerMinute = 150 * rate;
+    const msPerWord = (60 / wordsPerMinute) * 1000;
+    let simulatedIndex = index;
+
+    speechTimerRef.current = setInterval(() => {
+      simulatedIndex++;
+      if (simulatedIndex < endIndex) {
+        setCurrentItemIndex(simulatedIndex);
+      } else {
+        clearInterval(speechTimerRef.current);
+      }
+    }, msPerWord);
+
     utterance.onboundary = (event) => {
       if (event.name === 'word') {
         const charIndex = event.charIndex;
-        const activeUtteranceItem = utteranceItemsRef.current.find(it => 
-          charIndex >= it.start && charIndex <= it.end
-        );
+        // Search for the closest preceding word
+        let activeUtteranceItem = null;
+        for (const it of utteranceItemsRef.current) {
+          if (charIndex >= it.start) {
+            activeUtteranceItem = it;
+          } else {
+            break;
+          }
+        }
         if (activeUtteranceItem) {
-          setCurrentItemIndex(activeUtteranceItem.originalIndex);
+          const matchedIndex = activeUtteranceItem.originalIndex;
+          setCurrentItemIndex(matchedIndex);
+          simulatedIndex = matchedIndex; // Keep fallback timer in sync
         }
       }
     };
 
     utterance.onend = () => {
+      if (speechTimerRef.current) {
+        clearInterval(speechTimerRef.current);
+        speechTimerRef.current = null;
+      }
       if (endIndex < textItems.length) {
         startReading(endIndex);
       } else {
@@ -543,6 +577,10 @@ export default function App() {
 
     utterance.onerror = (e) => {
       console.error('TTS error:', e);
+      if (speechTimerRef.current) {
+        clearInterval(speechTimerRef.current);
+        speechTimerRef.current = null;
+      }
       if (e.error !== 'interrupted') {
         setIsPlaying(false);
         setIsPaused(false);
@@ -560,12 +598,18 @@ export default function App() {
       synthRef.current.pause();
       setIsPaused(true);
     }
+    if (speechTimerRef.current) {
+      clearInterval(speechTimerRef.current);
+      speechTimerRef.current = null;
+    }
   };
 
   const resumeReading = () => {
     if (synthRef.current && isPlaying && isPaused) {
       synthRef.current.resume();
       setIsPaused(false);
+      // Restart WPM timer on resume from the current word position
+      startReading(currentItemIndex >= 0 ? currentItemIndex : 0);
     } else if (textItems.length > 0) {
       startReading(currentItemIndex >= 0 ? currentItemIndex : 0);
     }
@@ -577,6 +621,10 @@ export default function App() {
       setIsPlaying(false);
       setIsPaused(false);
       setCurrentItemIndex(-1);
+    }
+    if (speechTimerRef.current) {
+      clearInterval(speechTimerRef.current);
+      speechTimerRef.current = null;
     }
     if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
