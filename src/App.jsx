@@ -507,9 +507,15 @@ export default function App() {
     utterance.onboundary = (event) => {
       if (event.name === 'word') {
         const charIndex = event.charIndex;
-        const activeUtteranceItem = utteranceItemsRef.current.find(it => 
-          charIndex >= it.start && charIndex <= it.end
-        );
+        // Find the closest preceding word using a scanned search
+        let activeUtteranceItem = null;
+        for (const it of utteranceItemsRef.current) {
+          if (charIndex >= it.start) {
+            activeUtteranceItem = it;
+          } else {
+            break;
+          }
+        }
         if (activeUtteranceItem) {
           setCurrentItemIndex(activeUtteranceItem.originalIndex);
         }
