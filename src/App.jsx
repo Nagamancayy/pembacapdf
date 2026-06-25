@@ -697,7 +697,7 @@ export default function App() {
   const filteredVoices = voices.filter(v => languageFilter === 'all' || v.lang.startsWith(languageFilter));
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', maxHeight: '100vh', overflow: 'hidden' }}>
+    <div className="app-container">
       
       {/* Header */}
       <header className="glass-panel" style={{ margin: '16px', padding: '12px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
@@ -717,10 +717,10 @@ export default function App() {
       </header>
 
       {/* Main workspace */}
-      <main style={{ flex: 1, display: 'grid', gridTemplateColumns: '320px 1fr', gap: '16px', padding: '0 16px 16px', minHeight: 0, overflow: 'hidden' }}>
+      <main className="main-layout">
         
         {/* Left Control Panel */}
-        <section className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px', overflowY: 'auto' }}>
+        <section className="glass-panel sidebar-panel">
           
           {/* File picker */}
           <div>
@@ -931,7 +931,7 @@ export default function App() {
         </section>
 
         {/* Right Panel: Interactive Visual PDF Canvas / DOCX Display */}
-        <section style={{ display: 'flex', flexDirection: 'column', gap: '12px', minWidth: 0, height: '100%', overflow: 'hidden' }}>
+        <section className="document-panel">
           
           {/* Top Controls Bar */}
           <div className="glass-panel" style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexShrink: 0 }}>

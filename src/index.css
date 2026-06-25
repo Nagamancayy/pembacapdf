@@ -211,3 +211,65 @@ button, select, input {
 .animate-pulse {
   animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+
+/* Layout structures */
+.app-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  max-height: 100vh;
+  overflow: hidden;
+}
+
+.main-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 16px;
+  padding: 0 16px 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-panel {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+
+.document-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Portrait view and mobile device responsive adjustments */
+@media (max-width: 900px) or (orientation: portrait) {
+  .app-container {
+    max-height: none;
+    overflow: auto;
+  }
+  
+  .main-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    max-height: none;
+    overflow: visible;
+  }
+  
+  .sidebar-panel {
+    max-height: none;
+    overflow: visible;
+  }
+  
+  .document-panel {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+}
