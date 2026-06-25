@@ -98,9 +98,11 @@ export default function App() {
   const [numPages, setNumPages] = useState(0);
   const [docxHtml, setDocxHtml] = useState(''); 
   
-  // Text & mapping states (word-level granularity)
-  const [textItems, setTextItems] = useState([]); // Array of { text, pageNum, rect, start, end }
-  const [currentItemIndex, setCurrentItemIndex] = useState(-1);
+  // Text & mapping states (sentence-level granularity)
+  const [sentences, setSentences] = useState([]); // Array of { text, start, end }
+  const [currentSentenceIndex, setCurrentSentenceIndex] = useState(-1);
+  const [hoveredSentenceIndex, setHoveredSentenceIndex] = useState(-1);
+  const [textItems, setTextItems] = useState([]); // Array of { text, pageNum, rect, start, end, sentenceIdx }
   
   // Local History States
   const [historyList, setHistoryList] = useState([]);
@@ -121,11 +123,9 @@ export default function App() {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const screenStreamRef = useRef(null);
-  const speechTimerRef = useRef(null);
 
   const synthRef = useRef(window.speechSynthesis);
   const utteranceRef = useRef(null);
-  const utteranceItemsRef = useRef([]); // maps word boundary charIndex to textItems index
   const canvasRefs = useRef({});
   const containerRef = useRef(null);
 
@@ -192,23 +192,25 @@ export default function App() {
     }
   };
 
-  // Sync scroll view based on active word item
+  // Sync scroll view based on active sentence
   useEffect(() => {
-    if (currentItemIndex >= 0 && textItems[currentItemIndex]) {
-      const activeItem = textItems[currentItemIndex];
-      const pageEl = document.getElementById(`page-container-${activeItem.pageNum}`);
-      
-      if (pageEl && containerRef.current) {
-        const rect = pageEl.getBoundingClientRect();
-        const containerRect = containerRef.current.getBoundingClientRect();
-        
-        const isOutOfView = rect.top < containerRect.top || rect.bottom > containerRect.bottom;
-        if (isOutOfView) {
-          pageEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (currentSentenceIndex >= 0 && sentences[currentSentenceIndex]) {
+      // Find the page of the current active sentence
+      const activeItem = textItems.find(item => item.sentenceIdx === currentSentenceIndex);
+      if (activeItem) {
+        const pageEl = document.getElementById(`page-container-${activeItem.pageNum}`);
+        if (pageEl && containerRef.current) {
+          const rect = pageEl.getBoundingClientRect();
+          const containerRect = containerRef.current.getBoundingClientRect();
+          
+          const isOutOfView = rect.top < containerRect.top || rect.bottom > containerRect.bottom;
+          if (isOutOfView) {
+            pageEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }
         }
       }
     }
-  }, [currentItemIndex, textItems]);
+  }, [currentSentenceIndex, sentences, textItems]);
 
   // Render PDF pages on canvas
   const renderPdfPage = async (pageNumber, pdfInstance) => {
@@ -237,6 +239,40 @@ export default function App() {
     }
   };
 
+  // Helper to split full text into clean sentences with global offsets
+  const segmentTextWithRanges = (text) => {
+    if (!text) return [];
+    
+    const sentenceRegex = /[^.!?]+[.!?]+/g;
+    let match;
+    const result = [];
+    
+    while ((match = sentenceRegex.exec(text)) !== null) {
+      const sentenceText = match[0].trim();
+      if (sentenceText.length > 2) {
+        result.push({
+          text: sentenceText,
+          start: match.index,
+          end: match.index + match[0].length
+        });
+      }
+    }
+
+    const lastIndex = sentenceRegex.lastIndex;
+    if (lastIndex < text.length) {
+      const remaining = text.substring(lastIndex).trim();
+      if (remaining.length > 2) {
+        result.push({
+          text: remaining,
+          start: lastIndex,
+          end: text.length
+        });
+      }
+    }
+
+    return result;
+  };
+
   // Process Document (accepts ArrayBuffer directly if loaded from DB)
   const processFile = async (uploadedFile, shouldSaveToDB = true) => {
     setLoading(true);
@@ -245,7 +281,7 @@ export default function App() {
     setPdfDoc(null);
     setNumPages(0);
     setDocxHtml('');
-    setCurrentItemIndex(-1);
+    setCurrentSentenceIndex(-1);
     stopReading();
 
     const extension = uploadedFile.name.split('.').pop().toLowerCase();
@@ -269,7 +305,7 @@ export default function App() {
             setNumPages(pdf.numPages);
 
             let fullText = '';
-            const items = [];
+            const rawItems = [];
 
             for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
               const page = await pdf.getPage(pageNum);
@@ -291,35 +327,34 @@ export default function App() {
                 const w = Math.abs(rect[2] - rect[0]);
                 const h = Math.abs(rect[3] - rect[1]);
 
-                const wordsAndSpaces = item.str.split(/(\s+)/);
-                const totalChars = item.str.length || 1;
-                let currentX = x;
+                const startIdx = fullText.length;
+                fullText += item.str + ' ';
+                const endIdx = fullText.length;
 
-                for (const part of wordsAndSpaces) {
-                  const partW = (part.length / totalChars) * w;
-                  if (part.trim().length > 0) {
-                    const startIdx = fullText.length;
-                    fullText += part;
-                    const endIdx = fullText.length;
-
-                    items.push({
-                      text: part,
-                      pageNum,
-                      rect: { x: currentX, y, w: partW, h, pageW: viewport.width, pageH: viewport.height },
-                      start: startIdx,
-                      end: endIdx
-                    });
-                  } else {
-                    fullText += part;
-                  }
-                  currentX += partW;
-                }
-                fullText += ' ';
+                rawItems.push({
+                  text: item.str,
+                  pageNum,
+                  rect: { x, y, w, h, pageW: viewport.width, pageH: viewport.height },
+                  start: startIdx,
+                  end: endIdx
+                });
               }
               fullText += '\n';
             }
 
-            setTextItems(items);
+            const segmented = segmentTextWithRanges(fullText);
+            setSentences(segmented);
+
+            // Map each raw PDF item to its corresponding sentence index
+            const itemsWithSentence = rawItems.map(item => {
+              const sIdx = segmented.findIndex(s => item.start < s.end && item.end > s.start);
+              return {
+                ...item,
+                sentenceIdx: sIdx
+              };
+            });
+
+            setTextItems(itemsWithSentence);
             setLoading(false);
           } catch (err) {
             console.error(err);
@@ -347,23 +382,8 @@ export default function App() {
             }
 
             const textResult = await mammoth.extractRawText({ arrayBuffer });
-            const rawWords = textResult.value.split(/\s+/).filter(w => w.length > 0);
-            
-            let offset = 0;
-            const items = rawWords.map((word) => {
-              const start = offset;
-              const end = offset + word.length;
-              offset += word.length + 1;
-              return {
-                text: word,
-                pageNum: 1,
-                rect: null,
-                start,
-                end
-              };
-            });
-
-            setTextItems(items);
+            const segmented = segmentTextWithRanges(textResult.value);
+            setSentences(segmented);
 
             const htmlResult = await mammoth.convertToHtml({ arrayBuffer });
             setDocxHtml(htmlResult.value);
@@ -424,8 +444,9 @@ export default function App() {
           setPdfDoc(null);
           setNumPages(0);
           setDocxHtml('');
+          setSentences([]);
           setTextItems([]);
-          setCurrentItemIndex(-1);
+          setCurrentSentenceIndex(-1);
           stopReading();
         }
       } catch (err) {
@@ -446,71 +467,28 @@ export default function App() {
     }
   }, [numPages, pdfDoc]);
 
-  // Audio / TTS Logic
+  // Audio / TTS Logic (100% smooth, natural sentence-by-sentence reading)
   const startReading = (index = 0) => {
-    if (!synthRef.current || textItems.length === 0) return;
+    if (!synthRef.current || sentences.length === 0) return;
     
     synthRef.current.cancel();
     
-    if (index < 0 || index >= textItems.length) {
+    if (index < 0 || index >= sentences.length) {
       setIsPlaying(false);
       setIsPaused(false);
-      setCurrentItemIndex(-1);
+      setCurrentSentenceIndex(-1);
       
-      // Auto-stop recording if it reaches the end
       if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
       }
       return;
     }
 
-    setCurrentItemIndex(index);
+    setCurrentSentenceIndex(index);
     setIsPlaying(true);
     setIsPaused(false);
 
-    // Read in chunks of 40 words to prevent browser speech synthesis overload/limits
-    const chunkSize = 40;
-    const endIndex = Math.min(index + chunkSize, textItems.length);
-    const chunkItems = textItems.slice(index, endIndex);
-    
-    let currentOffset = 0;
-    const utteranceItems = [];
-    const remainingTextParts = [];
-
-    for (let i = 0; i < chunkItems.length; i++) {
-      const item = chunkItems[i];
-      remainingTextParts.push(item.text);
-      utteranceItems.push({
-        originalIndex: index + i,
-        start: currentOffset,
-        end: currentOffset + item.text.length
-      });
-      currentOffset += item.text.length + 1;
-    }
-
-    utteranceItemsRef.current = utteranceItems;
-    const textToSpeak = remainingTextParts.join(' ');
-    
-    if (!textToSpeak.trim()) {
-      if (endIndex < textItems.length) {
-        startReading(endIndex);
-      } else {
-        setIsPlaying(false);
-        setIsPaused(false);
-        setCurrentItemIndex(-1);
-        if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-          mediaRecorderRef.current.stop();
-        }
-      }
-      return;
-    }
-
-    // Clear any existing backup timer
-    if (speechTimerRef.current) {
-      clearInterval(speechTimerRef.current);
-      speechTimerRef.current = null;
-    }
-
+    const textToSpeak = sentences[index].text;
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     utteranceRef.current = utterance;
 
@@ -521,54 +499,14 @@ export default function App() {
     utterance.pitch = pitch;
     utterance.volume = volume;
 
-    // Estimate speaking rate: ~150 words per minute at 1.0 rate.
-    // Set a timer interval to advance the highlight if the online voice does not trigger boundaries.
-    const wordsPerMinute = 150 * rate;
-    const msPerWord = (60 / wordsPerMinute) * 1000;
-    let simulatedIndex = index;
-
-    speechTimerRef.current = setInterval(() => {
-      simulatedIndex++;
-      if (simulatedIndex < endIndex) {
-        setCurrentItemIndex(simulatedIndex);
-      } else {
-        clearInterval(speechTimerRef.current);
-      }
-    }, msPerWord);
-
-    utterance.onboundary = (event) => {
-      if (event.name === 'word') {
-        const charIndex = event.charIndex;
-        // Search for the closest preceding word
-        let activeUtteranceItem = null;
-        for (const it of utteranceItemsRef.current) {
-          if (charIndex >= it.start) {
-            activeUtteranceItem = it;
-          } else {
-            break;
-          }
-        }
-        if (activeUtteranceItem) {
-          const matchedIndex = activeUtteranceItem.originalIndex;
-          setCurrentItemIndex(matchedIndex);
-          simulatedIndex = matchedIndex; // Keep fallback timer in sync
-        }
-      }
-    };
-
     utterance.onend = () => {
-      if (speechTimerRef.current) {
-        clearInterval(speechTimerRef.current);
-        speechTimerRef.current = null;
-      }
-      if (endIndex < textItems.length) {
-        startReading(endIndex);
+      if (index + 1 < sentences.length) {
+        startReading(index + 1);
       } else {
         setIsPlaying(false);
         setIsPaused(false);
-        setCurrentItemIndex(-1);
+        setCurrentSentenceIndex(-1);
         
-        // Auto-stop recording if it reaches the end
         if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
           mediaRecorderRef.current.stop();
         }
@@ -577,10 +515,6 @@ export default function App() {
 
     utterance.onerror = (e) => {
       console.error('TTS error:', e);
-      if (speechTimerRef.current) {
-        clearInterval(speechTimerRef.current);
-        speechTimerRef.current = null;
-      }
       if (e.error !== 'interrupted') {
         setIsPlaying(false);
         setIsPaused(false);
@@ -598,20 +532,14 @@ export default function App() {
       synthRef.current.pause();
       setIsPaused(true);
     }
-    if (speechTimerRef.current) {
-      clearInterval(speechTimerRef.current);
-      speechTimerRef.current = null;
-    }
   };
 
   const resumeReading = () => {
     if (synthRef.current && isPlaying && isPaused) {
       synthRef.current.resume();
       setIsPaused(false);
-      // Restart WPM timer on resume from the current word position
-      startReading(currentItemIndex >= 0 ? currentItemIndex : 0);
-    } else if (textItems.length > 0) {
-      startReading(currentItemIndex >= 0 ? currentItemIndex : 0);
+    } else if (sentences.length > 0) {
+      startReading(currentSentenceIndex >= 0 ? currentSentenceIndex : 0);
     }
   };
 
@@ -620,26 +548,22 @@ export default function App() {
       synthRef.current.cancel();
       setIsPlaying(false);
       setIsPaused(false);
-      setCurrentItemIndex(-1);
-    }
-    if (speechTimerRef.current) {
-      clearInterval(speechTimerRef.current);
-      speechTimerRef.current = null;
+      setCurrentSentenceIndex(-1);
     }
     if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
   };
 
-  const nextItem = () => {
-    if (textItems.length === 0) return;
-    const nextIdx = currentItemIndex + 1;
-    if (nextIdx < textItems.length) startReading(nextIdx);
+  const nextSentence = () => {
+    if (sentences.length === 0) return;
+    const nextIdx = currentSentenceIndex + 1;
+    if (nextIdx < sentences.length) startReading(nextIdx);
   };
 
-  const prevItem = () => {
-    if (textItems.length === 0) return;
-    const prevIdx = currentItemIndex - 1;
+  const prevSentence = () => {
+    if (sentences.length === 0) return;
+    const prevIdx = currentSentenceIndex - 1;
     if (prevIdx >= 0) startReading(prevIdx);
   };
 
@@ -692,14 +616,11 @@ export default function App() {
         a.click();
         URL.revokeObjectURL(url);
         
-        // Cleanup streams
         stream.getTracks().forEach(t => t.stop());
         setIsRecording(false);
       };
 
       recorder.start();
-      
-      // Start reading from the very beginning
       startReading(0);
 
     } catch (err) {
@@ -745,7 +666,7 @@ export default function App() {
           </div>
           <div>
             <h1 style={{ fontSize: '20px' }}>DocuVoice</h1>
-            <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Mulai membaca tepat dari kata yang Anda klik secara interaktif</p>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Mulai membaca tepat dari kalimat yang Anda klik secara interaktif</p>
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--text-muted)' }}>
@@ -916,7 +837,7 @@ export default function App() {
                   </span>
                   1. Gunakan <strong>Microsoft Edge</strong> atau <strong>Google Chrome</strong>.<br/>
                   2. Pilih suara yang mengandung kata <strong>"Online"</strong> atau <strong>"Natural"</strong> (berlabel ✨).<br/>
-                  3. Suara online buatan Microsoft/Google diolah secara neural di server cloud mereka, sehingga memiliki intonasi naik-turnun dan hembusan nafas yang sangat mirip manusia asli dibandingkan suara bawaan komputer offline yang kaku.
+                  3. Suara online buatan Microsoft/Google diolah secara neural di server cloud mereka, sehingga memiliki intonasi naik-turun dan hembusan nafas yang sangat mirip manusia asli dibandingkan suara bawaan komputer offline yang kaku.
                 </div>
               </div>
             </div>
@@ -961,7 +882,7 @@ export default function App() {
                 Dokumen termuat: <strong>{numPages} Halaman</strong>
               </p>
               <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px', lineHeight: '1.4' }}>
-                Ketuk kata mana saja pada dokumen untuk mulai membaca dari kata tersebut.
+                Ketuk kalimat mana saja pada dokumen untuk mulai membaca dari kalimat tersebut.
               </p>
             </div>
           )}
@@ -975,8 +896,8 @@ export default function App() {
           <div className="glass-panel" style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexShrink: 0 }}>
             <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
               <button 
-                onClick={prevItem} 
-                disabled={textItems.length === 0 || currentItemIndex <= 0}
+                onClick={prevSentence} 
+                disabled={sentences.length === 0 || currentSentenceIndex <= 0}
                 className="glass-panel"
                 style={{ padding: '8px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', border: '1px solid var(--border-color)' }}
               >
@@ -995,7 +916,7 @@ export default function App() {
               ) : (
                 <button 
                   onClick={resumeReading}
-                  disabled={textItems.length === 0}
+                  disabled={sentences.length === 0}
                   className="glow-btn"
                   style={{ padding: '8px 16px', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px' }}
                 >
@@ -1014,8 +935,8 @@ export default function App() {
               </button>
 
               <button 
-                onClick={nextItem} 
-                disabled={textItems.length === 0 || currentItemIndex >= textItems.length - 1}
+                onClick={nextSentence} 
+                disabled={sentences.length === 0 || currentSentenceIndex >= sentences.length - 1}
                 className="glass-panel"
                 style={{ padding: '8px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', border: '1px solid var(--border-color)' }}
               >
@@ -1035,7 +956,7 @@ export default function App() {
               ) : (
                 <button 
                   onClick={startRecordingAudio}
-                  disabled={textItems.length === 0}
+                  disabled={sentences.length === 0}
                   className="glass-panel"
                   style={{ padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', color: '#fff', border: '1px solid var(--border-color)', fontSize: '13px' }}
                 >
@@ -1054,13 +975,13 @@ export default function App() {
                     left: 0, 
                     height: '100%', 
                     background: 'linear-gradient(90deg, var(--accent-primary) 0%, var(--accent-secondary) 100%)',
-                    width: textItems.length > 0 ? `${((currentItemIndex + 1) / textItems.length) * 100}%` : '0%',
+                    width: sentences.length > 0 ? `${((currentSentenceIndex + 1) / sentences.length) * 100}%` : '0%',
                     transition: 'width 0.2s ease'
                   }} 
                 />
               </div>
               <span style={{ fontSize: '11px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                {textItems.length > 0 ? `${Math.round(((currentItemIndex + 1) / textItems.length) * 100)}%` : '0%'}
+                {sentences.length > 0 ? `${Math.round(((currentSentenceIndex + 1) / sentences.length) * 100)}%` : '0%'}
               </span>
             </div>
           </div>
@@ -1129,12 +1050,12 @@ export default function App() {
                         style={{ display: 'block', width: '100%', height: 'auto' }}
                       />
 
-                      {/* Bounding Box Highlights mapped on word level */}
+                      {/* Bounding Box Highlights mapped on sentence level */}
                       {textItems
                         .filter(item => item.pageNum === pageNum)
                         .map((item, idx) => {
-                          const globalIdx = textItems.indexOf(item);
-                          const active = globalIdx === currentItemIndex;
+                          const active = item.sentenceIdx === currentSentenceIndex;
+                          const hovered = item.sentenceIdx === hoveredSentenceIndex;
                           
                           const canvasEl = canvasRefs.current[pageNum];
                           if (!canvasEl) return null;
@@ -1145,13 +1066,20 @@ export default function App() {
                           return (
                             <div
                               key={idx}
-                              onClick={() => startReading(globalIdx)}
-                              className={`pdf-text-overlay ${active ? 'active' : ''}`}
+                              onClick={() => startReading(item.sentenceIdx)}
+                              onMouseEnter={() => setHoveredSentenceIndex(item.sentenceIdx)}
+                              onMouseLeave={() => setHoveredSentenceIndex(-1)}
+                              className={`pdf-text-overlay ${active ? 'active' : ''} ${hovered ? 'hovered' : ''}`}
                               style={{
                                 left: `${item.rect.x * scaleX}px`,
                                 top: `${item.rect.y * scaleY}px`,
                                 width: `${item.rect.w * scaleX}px`,
-                                height: `${item.rect.h * scaleY}px`
+                                height: `${item.rect.h * scaleY}px`,
+                                backgroundColor: active 
+                                  ? 'rgba(250, 204, 21, 0.35)' 
+                                  : hovered 
+                                    ? 'rgba(99, 102, 241, 0.12)' 
+                                    : 'transparent'
                               }}
                               title={item.text}
                             />
@@ -1182,24 +1110,26 @@ export default function App() {
                 }}
               >
                 <div style={{ wordBreak: 'break-word' }}>
-                  {textItems.map((item, idx) => {
-                    const active = idx === currentItemIndex;
+                  {sentences.map((s, idx) => {
+                    const active = idx === currentSentenceIndex;
                     return (
                       <span 
                         key={idx}
                         onClick={() => startReading(idx)}
                         style={{ 
                           cursor: 'pointer', 
-                          padding: '1px 3px', 
-                          borderRadius: '3px',
+                          padding: '2px 4px', 
+                          borderRadius: '4px',
                           background: active ? 'rgba(250, 204, 21, 0.35)' : 'transparent',
                           color: active ? '#000' : 'inherit',
                           fontWeight: active ? 'bold' : 'normal',
-                          display: 'inline-block',
-                          marginRight: '6px'
+                          display: 'inline',
+                          marginRight: '4px',
+                          borderBottom: active ? '2px solid #eab308' : 'none',
+                          transition: 'background-color 0.15s ease'
                         }}
                       >
-                        {item.text}
+                        {s.text}{' '}
                       </span>
                     );
                   })}
