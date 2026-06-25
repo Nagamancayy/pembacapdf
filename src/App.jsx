@@ -128,6 +128,7 @@ export default function App() {
   const utteranceRef = useRef(null);
   const canvasRefs = useRef({});
   const containerRef = useRef(null);
+  const sessionSentenceCountRef = useRef(0);
 
   // Load available voices and history list
   useEffect(() => {
@@ -467,8 +468,8 @@ export default function App() {
     }
   }, [numPages, pdfDoc]);
 
-  // Audio / TTS Logic (100% smooth, natural sentence-by-sentence reading)
-  const startReading = (index = 0) => {
+  // Audio / TTS Logic (100% smooth, natural sentence-by-sentence reading with clicked-word start)
+  const startReading = (index = 0, startWordIdx = -1) => {
     if (!synthRef.current || sentences.length === 0) return;
     
     synthRef.current.cancel();
@@ -484,11 +485,37 @@ export default function App() {
       return;
     }
 
+    // Reset session counter ONLY when we start a fresh session (i.e. clicked word or clicked Play)
+    if (startWordIdx !== -1 || !isPlaying) {
+      sessionSentenceCountRef.current = 0;
+    }
+
     setCurrentSentenceIndex(index);
     setIsPlaying(true);
     setIsPaused(false);
 
-    const textToSpeak = sentences[index].text;
+    let textToSpeak = '';
+    if (startWordIdx !== -1) {
+      // Find all textItems in the current sentence
+      const sentenceItems = textItems.filter(it => it.sentenceIdx === index);
+      // Filter out items that are before the clicked word
+      const remainingItems = sentenceItems.filter(it => textItems.indexOf(it) >= startWordIdx);
+      textToSpeak = remainingItems.map(it => it.text).join(' ');
+    } else {
+      textToSpeak = sentences[index].text;
+    }
+
+    if (!textToSpeak.trim()) {
+      if (index + 1 < sentences.length) {
+        startReading(index + 1, -1);
+      } else {
+        setIsPlaying(false);
+        setIsPaused(false);
+        setCurrentSentenceIndex(-1);
+      }
+      return;
+    }
+
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     utteranceRef.current = utterance;
 
@@ -500,8 +527,22 @@ export default function App() {
     utterance.volume = volume;
 
     utterance.onend = () => {
+      sessionSentenceCountRef.current += 1;
+
+      // Limit continuous session reading to a maximum of 10 sentences
+      if (sessionSentenceCountRef.current >= 10) {
+        setIsPlaying(false);
+        setIsPaused(false);
+        setCurrentSentenceIndex(-1);
+        
+        if (isRecording && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+        return;
+      }
+
       if (index + 1 < sentences.length) {
-        startReading(index + 1);
+        startReading(index + 1, -1); // subsequent sentences are read in full
       } else {
         setIsPlaying(false);
         setIsPaused(false);
@@ -1063,10 +1104,12 @@ export default function App() {
                           const scaleX = canvasEl.width / item.rect.pageW;
                           const scaleY = canvasEl.height / item.rect.pageH;
 
+                          const globalIdx = textItems.indexOf(item);
+
                           return (
                             <div
                               key={idx}
-                              onClick={() => startReading(item.sentenceIdx)}
+                              onClick={() => startReading(item.sentenceIdx, globalIdx)}
                               onMouseEnter={() => setHoveredSentenceIndex(item.sentenceIdx)}
                               onMouseLeave={() => setHoveredSentenceIndex(-1)}
                               className={`pdf-text-overlay ${active ? 'active' : ''} ${hovered ? 'hovered' : ''}`}
